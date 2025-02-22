@@ -1,7 +1,7 @@
-import asyncio
 from datetime import datetime, timedelta
+from sqlalchemy.orm import joinedload
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from sqlalchemy.future import select
 
@@ -50,7 +50,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     main_keyboard = get_main_reply_keyboard()
-    welcome_text = "<b>Добро пожаловать!</b>\n" "Выберите категорию для изучения тем конференции <i>Войти в IT</i>."
+    welcome_text = "<b>Добро пожаловать!</b>\n" "Выберите категорию."
     # Отправляем приветственное сообщение с постоянной клавиатурой
     await update.message.reply_text(welcome_text, reply_markup=main_keyboard, parse_mode="HTML")
     # Отправляем inline‑клавиатуру с категориями
@@ -68,8 +68,8 @@ async def about_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     about_text = (
         "<b>О боте</b>\n"
         "Этот бот был создан для конференции <i>Войти в IT</i> "
-        "для доклада <a href='https://t.me/NiKoV_HET'>Овчинникова Никиты</a>.\n"
-        "Доклад на тему <b>Использовании LLM в учебе, работе и жизни</b>.\n"
+        "Докладчик: <a href='https://t.me/NiKoV_HET'>Овчинников Никита</a>.\n"
+        "Тема: <b>Использовании LLM в учебе, работе и жизни</b>.\n"
         "Здесь вы можете подробнее познакомиться с рассказанными примерами и источниками.\n"
         "Исходный код бота доступен на <a href='https://github.com/NiKoV-HET/VoitiVIT_LLM_bot'>GitHub</a>"
     )
@@ -164,14 +164,19 @@ async def subtopic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("Неверные данные.", parse_mode="HTML")
         return
     async with async_session() as session:
-        result = await session.execute(select(Subtopic).where(Subtopic.id == subtopic_id))
+        result = await session.execute(
+            select(Subtopic).options(joinedload(Subtopic.category)).where(Subtopic.id == subtopic_id)
+        )
         subtopic = result.scalar_one_or_none()
         if subtopic:
             log = Log(user_id=str(user_id), message=f"Selected subtopic: {subtopic.name}")
             session.add(log)
             await session.commit()
-            text = subtopic.content if subtopic.content else "Нет дополнительной информации."
-            await query.message.edit_text(text, parse_mode="HTML")
+            category_name = subtopic.category.name if subtopic.category else "Неизвестная категория"
+            header = f"Вы выбрали категорию: <b>{category_name}</b>\nРаздел: <b>{subtopic.name}</b>\n\n"
+            content = subtopic.content if subtopic.content else "Нет дополнительной информации."
+            final_text = header + content
+            await query.message.edit_text(final_text, parse_mode="HTML")
             if subtopic.media:
                 if subtopic.media.endswith(".mp4"):
                     await query.message.reply_video(video=subtopic.media)

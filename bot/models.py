@@ -29,8 +29,7 @@ class Subtopic(Base):
 
 class User(Base):
     __tablename__ = "users"
-    id = Column(Integer, primary_key=True)
-    tg_id = Column(String, unique=True, nullable=False)
+    tg_id = Column(String, primary_key=True, nullable=False)  # Telegram ID как основной ключ
     full_name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     username = Column(String, nullable=True)
@@ -39,7 +38,7 @@ class User(Base):
 class Feedback(Base):
     __tablename__ = "feedbacks"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False)
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # Связь с таблицей users
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -47,6 +46,6 @@ class Feedback(Base):
 class Log(Base):
     __tablename__ = "logs"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, nullable=False)
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # Связь с таблицей users
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

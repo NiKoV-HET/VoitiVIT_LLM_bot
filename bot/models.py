@@ -10,6 +10,7 @@ class Category(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
     description = Column(Text, nullable=True)
+    display_order = Column(Integer, nullable=False, default=0)  # Порядок отображения
 
     subtopics = relationship("Subtopic", back_populates="category")
 
@@ -21,8 +22,18 @@ class Subtopic(Base):
     name = Column(String, nullable=False)
     content = Column(Text, nullable=True)
     media = Column(String, nullable=True)
+    display_order = Column(Integer, nullable=False, default=0)  # Порядок отображения
 
     category = relationship("Category", back_populates="subtopics")
+
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    tg_id = Column(String, unique=True, nullable=False)
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=True)
+    username = Column(String, nullable=True)
 
 
 class Feedback(Base):

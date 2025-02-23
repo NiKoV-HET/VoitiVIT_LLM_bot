@@ -216,7 +216,7 @@ async def llm_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == str(user_id)))
         usage = result.scalar_one_or_none()
         if usage is None:
-            usage = LLMUsage(user_id=str(user_id), used=0, limit=10)  # дефолтный лимит 10
+            usage = LLMUsage(user_id=str(user_id), used=0, limit=int(os.getenv("DEFAULT_LIMIT_LLM")))
             session.add(usage)
             await session.commit()
         if usage.used >= usage.limit:

@@ -1,8 +1,9 @@
-from telegram.ext import ApplicationBuilder
 from telegram import BotCommand
+from telegram.ext import ApplicationBuilder
+
 from bot.config import BOT_TOKEN
-from bot.handlers import register_handlers
 from bot.database import engine
+from bot.handlers import register_handlers
 from bot.models import Base
 
 
@@ -13,6 +14,9 @@ async def on_startup(app):
         BotCommand("start", "Начать работу с ботом"),
         BotCommand("about", "О боте"),
         BotCommand("feedback", "Оставить обратную связь"),
+        BotCommand("llm_enable", "Включить LLM (суперпользователь)"),
+        BotCommand("llm_disable", "Выключить LLM (суперпользователь)"),
+        BotCommand("llm_set_limit", "Установить лимит для пользователя (суперпользователь)"),
     ]
     await app.bot.set_my_commands(commands)
     print("Бот запущен.")

@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime
-from sqlalchemy.orm import relationship, declarative_base
 from datetime import datetime
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
 
@@ -38,7 +39,7 @@ class User(Base):
 class Feedback(Base):
     __tablename__ = "feedbacks"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # Связь с таблицей users
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # связь с users
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -46,6 +47,31 @@ class Feedback(Base):
 class Log(Base):
     __tablename__ = "logs"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # Связь с таблицей users
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)  # связь с users
     message = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# Новые модели для LLM
+
+
+class LLMUsage(Base):
+    __tablename__ = "llm_usage"
+    user_id = Column(String, ForeignKey("users.tg_id"), primary_key=True, nullable=False)
+    used = Column(Integer, default=0, nullable=False)
+    limit = Column(Integer, default=10, nullable=False)  # стандартный лимит, например 10 запросов
+
+
+class LLMRequest(Base):
+    __tablename__ = "llm_requests"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)
+    prompt = Column(Text, nullable=False)
+    response = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LLMConfig(Base):
+    __tablename__ = "llm_config"
+    id = Column(Integer, primary_key=True, index=True)
+    enabled = Column(Boolean, default=True, nullable=False)

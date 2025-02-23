@@ -8,17 +8,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "${POSTGRES_HOST}:${POSTGRES_PORT}:5432"
+      - "127.0.0.1:${POSTGRES_PORT}:5432"
     volumes:
       - ./pgdata:/var/lib/postgresql/data/pgdata
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'
-          memory: 512M
-        reservations:
-          cpus: '0.25'
-          memory: 256M
     command: >
       postgres -c max_connections=1000
                -c shared_buffers=256MB
@@ -28,14 +20,25 @@ services:
                -c wal_buffers=16MB
                -c default_statistics_target=100
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres_user -d postgres_db" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}" ]
       interval: 30s
       timeout: 10s
       retries: 5
     restart: unless-stopped
     tty: true
     stdin_open: true
+    networks:
+      - appnet
 
-volumes:
-  pgdata:
-    driver: local
+  app:
+    build: .
+    container_name: bot_app
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    networks:
+      - appnet
+
+networks:
+  appnet:
+    driver: bridge

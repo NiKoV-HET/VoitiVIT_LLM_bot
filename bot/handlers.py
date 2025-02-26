@@ -7,9 +7,9 @@ from telegram import Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from bot.database import async_session
-from bot.keyboards import get_categories_inline_keyboard, get_main_reply_keyboard, get_subtopics_inline_keyboard
+from bot.keyboards import get_admin_control_keyboard, get_admin_reply_keyboard, get_categories_inline_keyboard, get_main_reply_keyboard, get_subtopics_inline_keyboard, get_users_keyboard, get_user_actions_keyboard, get_llm_models_keyboard
 from bot.llm import get_llm_response
-from bot.models import Category, Feedback, LLMConfig, LLMRequest, LLMUsage, Log, Subtopic, User, UserImage
+from bot.models import Category, Feedback, LLMConfig, LLMRequest, LLMUsage, Log, Subtopic, User, UserImage, LLMModel
 from bot.storage import image_to_base64, save_image
 
 # Простой in‑memory rate limiting (5 запросов в минуту)
@@ -21,6 +21,12 @@ SUPERUSER_TG_NAME = os.getenv("SUPERUSER_TG_NAME")  # Имя суперполь�
 
 # Словарь для хранения последних загруженных изображений пользователей
 user_last_image = {}
+
+# Словарь для хранения текущей страницы пользователей для каждого администратора
+admin_user_pages = {}
+
+# Словарь для хранения выбранного пользователя для каждого администратора
+selected_users = {}
 
 
 async def check_rate_limit(user_id: int) -> bool:
@@ -65,7 +71,15 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Слишком много запросов. Пожалуйста, подождите.")
         return
 
-    main_keyboard = get_main_reply_keyboard()
+    # Проверяем, является ли пользователь суперпользователем
+    is_superuser = str(user_id) == SUPERUSER_TG_ID
+    
+    # Выбираем соответствующую клавиатуру
+    if is_superuser:
+        main_keyboard = get_admin_reply_keyboard()
+    else:
+        main_keyboard = get_main_reply_keyboard()
+        
     welcome_text = "<b>Добро пожаловать!</b>\n" "Выберите категорию."
     # Отправляем приветственное сообщение с постоянной клавиатурой
     await update.message.reply_text(welcome_text, reply_markup=main_keyboard, parse_mode="HTML")
@@ -136,6 +150,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+    is_superuser = str(user_id) == SUPERUSER_TG_ID
+
+    # Если бот ожидает отзыв - обрабатываем его в первую очередь
+    if context.user_data.get("awaiting_feedback"):
+        feedback_text = text
+        async with async_session() as session:
+            feedback = Feedback(user_id=str(user_id), message=feedback_text)
+            session.add(feedback)
+            await session.commit()
+        await update.message.reply_text("Спасибо за ваш отзыв!", parse_mode="HTML")
+        async with async_session() as session:
+            log = Log(user_id=str(user_id), message=f"Feedback: {feedback_text}")
+            session.add(log)
+            await session.commit()
+        context.user_data["awaiting_feedback"] = False
+        return
 
     # Если пользователь нажал кнопку "Основное меню"
     if text == "Основное меню":
@@ -150,23 +180,354 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Оставить обратную связь":
         await feedback_command_handler(update, context)
         return
+        
+    # Обработка кнопок администратора
+    if is_superuser:
+        # Кнопка "Управление ботом"
+        if text == "Управление ботом":
+            admin_keyboard = get_admin_control_keyboard()
+            await update.message.reply_text(
+                "Панель управления ботом. Выберите действие:", 
+                reply_markup=admin_keyboard
+            )
+            return
+            
+        # Кнопка "Назад" в меню управления
+        if text == "Назад":
+            admin_keyboard = get_admin_reply_keyboard()
+            await update.message.reply_text(
+                "Возврат в основное меню", 
+                reply_markup=admin_keyboard
+            )
+            return
+            
+        # Кнопка "Управление пользователями"
+        if text == "Управление пользователями":
+            # Устанавливаем начальную страницу
+            admin_user_pages[str(user_id)] = 0
+            # Получаем клавиатуру с пользователями
+            users_keyboard = await get_users_keyboard(page=0)
+            await update.message.reply_text(
+                "Выберите пользователя:", 
+                reply_markup=users_keyboard
+            )
+            return
+            
+        # Кнопка "Вернуться в меню управления"
+        if text == "Вернуться в меню управления":
+            admin_keyboard = get_admin_control_keyboard()
+            await update.message.reply_text(
+                "Панель управления ботом. Выберите действие:", 
+                reply_markup=admin_keyboard
+            )
+            return
+            
+        # Кнопка "Назад к списку пользователей"
+        if text == "Назад к списку пользователей":
+            # Получаем текущую страницу
+            current_page = admin_user_pages.get(str(user_id), 0)
+            # Очищаем выбранного пользователя
+            if str(user_id) in selected_users:
+                del selected_users[str(user_id)]
+            # Получаем клавиатуру с пользователями
+            users_keyboard = await get_users_keyboard(page=current_page)
+            await update.message.reply_text(
+                "Выберите пользователя:", 
+                reply_markup=users_keyboard
+            )
+            return
+            
+        # Обработка навигации по страницам пользователей
+        if text == "◀️ Назад":
+            # Уменьшаем номер страницы
+            current_page = admin_user_pages.get(str(user_id), 0)
+            if current_page > 0:
+                admin_user_pages[str(user_id)] = current_page - 1
+            # Получаем клавиатуру с пользователями
+            users_keyboard = await get_users_keyboard(page=admin_user_pages[str(user_id)])
+            await update.message.reply_text(
+                "Выберите пользователя:", 
+                reply_markup=users_keyboard
+            )
+            return
+            
+        if text == "Вперед ▶️":
+            # Увеличиваем номер страницы
+            current_page = admin_user_pages.get(str(user_id), 0)
+            admin_user_pages[str(user_id)] = current_page + 1
+            # Получаем клавиатуру с пользователями
+            users_keyboard = await get_users_keyboard(page=admin_user_pages[str(user_id)])
+            await update.message.reply_text(
+                "Выберите пользователя:", 
+                reply_markup=users_keyboard
+            )
+            return
+            
+        # Проверяем, выбран ли пользователь из списка
+        async with async_session() as session:
+            users_result = await session.execute(select(User))
+            users = users_result.scalars().all()
+            
+            for user_obj in users:
+                display_name = f"{user_obj.full_name}"
+                if user_obj.username:
+                    display_name += f" (@{user_obj.username})"
+                    
+                if text == display_name:
+                    # Сохраняем выбранного пользователя
+                    selected_users[str(user_id)] = user_obj.tg_id
+                    
+                    # Получаем дополнительную информацию о пользователе
+                    llm_status = "включен" if user_obj.llm_enabled else "отключен"
+                    model_info = f"Модель: {user_obj.llm_model}" if user_obj.llm_model else "Модель не установлена"
+                    
+                    # Получаем информацию о лимите
+                    usage_result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == user_obj.tg_id))
+                    usage = usage_result.scalar_one_or_none()
+                    limit_info = ""
+                    if usage:
+                        limit_info = f"Использовано {usage.used} из {usage.limit} запросов"
+                    else:
+                        limit_info = "Лимит не установлен"
+                    
+                    # Показываем клавиатуру действий с пользователем
+                    actions_keyboard = get_user_actions_keyboard()
+                    await update.message.reply_text(
+                        f"Выбран пользователь: {display_name}\n"
+                        f"ID: {user_obj.tg_id}\n"
+                        f"LLM: {llm_status}\n"
+                        f"{model_info}\n"
+                        f"{limit_info}\n\n"
+                        f"Выберите действие:", 
+                        reply_markup=actions_keyboard
+                    )
+                    return
+        
+        # Если выбран пользователь, обрабатываем действия с ним
+        if str(user_id) in selected_users:
+            selected_user_id = selected_users[str(user_id)]
+            
+            # Действие "Включить LLM"
+            if text == "Включить LLM":
+                async with async_session() as session:
+                    result = await session.execute(select(User).where(User.tg_id == selected_user_id))
+                    user_obj = result.scalar_one_or_none()
+                    if user_obj:
+                        user_obj.llm_enabled = True
+                        await session.commit()
+                        # Получаем обновленную информацию о пользователе
+                        user_info = await get_user_info(selected_user_id)
+                        await update.message.reply_text(f"LLM функция включена для пользователя.\n\n{user_info}")
+                    else:
+                        await update.message.reply_text("Пользователь не найден.")
+                return
+                
+            # Действие "Выключить LLM"
+            if text == "Выключить LLM":
+                async with async_session() as session:
+                    result = await session.execute(select(User).where(User.tg_id == selected_user_id))
+                    user_obj = result.scalar_one_or_none()
+                    if user_obj:
+                        user_obj.llm_enabled = False
+                        await session.commit()
+                        # Получаем обновленную информацию о пользователе
+                        user_info = await get_user_info(selected_user_id)
+                        await update.message.reply_text(f"LLM функция отключена для пользователя.\n\n{user_info}")
+                    else:
+                        await update.message.reply_text("Пользователь не найден.")
+                return
+                
+            # Действие "Установить модель"
+            if text == "Установить модель":
+                # Получаем клавиатуру с моделями
+                models_keyboard = await get_llm_models_keyboard()
+                await update.message.reply_text(
+                    "Выберите модель для пользователя или добавьте новую:",
+                    reply_markup=models_keyboard
+                )
+                context.user_data["awaiting_model_selection"] = True
+                return
+                
+            # Действие "Установить лимит"
+            if text == "Установить лимит":
+                await update.message.reply_text(
+                    "Введите новый лимит запросов для пользователя (число):"
+                )
+                context.user_data["awaiting_limit_for_user"] = True
+                return
+        
+        # Обработка выбора модели из списка
+        if context.user_data.get("awaiting_model_selection") and str(user_id) in selected_users:
+            selected_user_id = selected_users[str(user_id)]
+            
+            # Если выбрана опция "Добавить новую модель"
+            if text == "Добавить новую модель":
+                await update.message.reply_text(
+                    "Введите название новой модели (как оно будет использоваться в API):"
+                )
+                context.user_data["awaiting_new_model_name"] = True
+                context.user_data["awaiting_model_selection"] = False
+                return
+                
+            # Если выбрана опция "Назад"
+            if text == "Назад":
+                # Возвращаемся к действиям с пользователем
+                actions_keyboard = get_user_actions_keyboard()
+                await update.message.reply_text(
+                    "Выберите действие:", 
+                    reply_markup=actions_keyboard
+                )
+                context.user_data["awaiting_model_selection"] = False
+                return
+                
+            # Проверяем, выбрана ли модель из списка
+            async with async_session() as session:
+                models_result = await session.execute(select(LLMModel))
+                models = models_result.scalars().all()
+                
+                for model in models:
+                    model_display = f"{model.name} - {model.description}"
+                    if text == model_display:
+                        # Устанавливаем выбранную модель для пользователя
+                        result = await session.execute(select(User).where(User.tg_id == selected_user_id))
+                        user_obj = result.scalar_one_or_none()
+                        if user_obj:
+                            user_obj.llm_model = model.name
+                            await session.commit()
+                            # Получаем обновленную информацию о пользователе
+                            user_info = await get_user_info(selected_user_id)
+                            await update.message.reply_text(
+                                f"Модель LLM для пользователя установлена на {model.name}.\n\n{user_info}",
+                                reply_markup=get_user_actions_keyboard()
+                            )
+                        else:
+                            await update.message.reply_text("Пользователь не найден.")
+                        
+                        context.user_data["awaiting_model_selection"] = False
+                        return
+            
+            # Если модель не найдена, сообщаем об ошибке
+            await update.message.reply_text(
+                "Выбранная модель не найдена. Пожалуйста, выберите модель из списка или добавьте новую.",
+                reply_markup=await get_llm_models_keyboard()
+            )
+            return
+            
+        # Обработка ввода названия новой модели
+        if context.user_data.get("awaiting_new_model_name"):
+            model_name = text.strip()
+            context.user_data["new_model_name"] = model_name
+            context.user_data["awaiting_new_model_name"] = False
+            context.user_data["awaiting_new_model_description"] = True
+            
+            await update.message.reply_text(
+                f"Введите описание для модели '{model_name}':"
+            )
+            return
+            
+        # Обработка ввода описания новой модели
+        if context.user_data.get("awaiting_new_model_description") and "new_model_name" in context.user_data:
+            model_description = text.strip()
+            model_name = context.user_data["new_model_name"]
+            
+            # Добавляем новую модель в базу данных
+            async with async_session() as session:
+                # Проверяем, существует ли уже такая модель
+                result = await session.execute(select(LLMModel).where(LLMModel.name == model_name))
+                existing_model = result.scalar_one_or_none()
+                
+                if existing_model:
+                    await update.message.reply_text(
+                        f"Модель с названием '{model_name}' уже существует. Пожалуйста, выберите другое название.",
+                        reply_markup=await get_llm_models_keyboard()
+                    )
+                else:
+                    # Создаем новую модель
+                    new_model = LLMModel(name=model_name, description=model_description)
+                    session.add(new_model)
+                    await session.commit()
+                    
+                    # Если есть выбранный пользователь, устанавливаем ему эту модель
+                    if str(user_id) in selected_users:
+                        selected_user_id = selected_users[str(user_id)]
+                        user_result = await session.execute(select(User).where(User.tg_id == selected_user_id))
+                        user_obj = user_result.scalar_one_or_none()
+                        
+                        if user_obj:
+                            user_obj.llm_model = model_name
+                            await session.commit()
+                            # Получаем обновленную информацию о пользователе
+                            user_info = await get_user_info(selected_user_id)
+                            await update.message.reply_text(
+                                f"Новая модель '{model_name}' добавлена и установлена для пользователя.\n\n{user_info}",
+                                reply_markup=get_user_actions_keyboard()
+                            )
+                        else:
+                            await update.message.reply_text(
+                                f"Новая модель '{model_name}' добавлена, но пользователь не найден.",
+                                reply_markup=get_user_actions_keyboard()
+                            )
+            
+            # Очищаем состояние
+            context.user_data.pop("new_model_name", None)
+            context.user_data["awaiting_new_model_description"] = False
+            return
+        
+        # Обработка ввода лимита для пользователя
+        if context.user_data.get("awaiting_limit_for_user") and str(user_id) in selected_users:
+            selected_user_id = selected_users[str(user_id)]
+            try:
+                new_limit = int(text.strip())
+                
+                async with async_session() as session:
+                    result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == selected_user_id))
+                    usage = result.scalar_one_or_none()
+                    if usage is None:
+                        usage = LLMUsage(user_id=selected_user_id, used=0, limit=new_limit)
+                        session.add(usage)
+                    else:
+                        usage.limit = new_limit
+                    await session.commit()
+                    
+                    # Получаем обновленную информацию о пользователе
+                    user_info = await get_user_info(selected_user_id)
+                    await update.message.reply_text(f"Лимит для пользователя установлен в {new_limit}.\n\n{user_info}")
+            except ValueError:
+                await update.message.reply_text("Ошибка: введите корректное число.")
+            
+            context.user_data["awaiting_limit_for_user"] = False
+            return
+        
+        # Кнопка "Включить LLM" (глобально)
+        if text == "Включить LLM":
+            async with async_session() as session:
+                result = await session.execute(select(LLMConfig))
+                config = result.scalars().first()
+                if config is None:
+                    config = LLMConfig(enabled=True)
+                    session.add(config)
+                else:
+                    config.enabled = True
+                await session.commit()
+            await update.message.reply_text("LLM функция включена.")
+            return
+            
+        # Кнопка "Выключить LLM" (глобально)
+        if text == "Выключить LLM":
+            async with async_session() as session:
+                result = await session.execute(select(LLMConfig))
+                config = result.scalars().first()
+                if config is None:
+                    config = LLMConfig(enabled=False)
+                    session.add(config)
+                else:
+                    config.enabled = False
+                await session.commit()
+            await update.message.reply_text("LLM функция отключена.")
+            return
 
-    # Если бот ожидает отзыв
-    if context.user_data.get("awaiting_feedback"):
-        feedback_text = text
-        async with async_session() as session:
-            feedback = Feedback(user_id=str(user_id), message=feedback_text)
-            session.add(feedback)
-            await session.commit()
-        await update.message.reply_text("Спасибо за ваш отзыв!", parse_mode="HTML")
-        async with async_session() as session:
-            log = Log(user_id=str(user_id), message=f"Feedback: {feedback_text}")
-            session.add(log)
-            await session.commit()
-        context.user_data["awaiting_feedback"] = False
-        return
-    else:
-        await llm_query_handler(update, context)
+    # Удаляем дублирующийся код обработки обратной связи
+    await llm_query_handler(update, context)
 
 
 # Callback‑обработчик для выбора категории
@@ -698,6 +1059,41 @@ async def llm_user_disable_handler(update: Update, context: ContextTypes.DEFAULT
         f"LLM функция отключена для пользователя {target_tg_id}.",
         reply_to_message_id=update.message.message_id,
     )
+
+
+# Функция для получения информации о пользователе
+async def get_user_info(user_id):
+    async with async_session() as session:
+        # Получаем информацию о пользователе
+        user_result = await session.execute(select(User).where(User.tg_id == user_id))
+        user = user_result.scalar_one_or_none()
+        
+        if not user:
+            return "Пользователь не найден"
+        
+        display_name = f"{user.full_name}"
+        if user.username:
+            display_name += f" (@{user.username})"
+            
+        llm_status = "включен" if user.llm_enabled else "отключен"
+        model_info = f"Модель: {user.llm_model}" if user.llm_model else "Модель не установлена"
+        
+        # Получаем информацию о лимите
+        usage_result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == user_id))
+        usage = usage_result.scalar_one_or_none()
+        limit_info = ""
+        if usage:
+            limit_info = f"Использовано {usage.used} из {usage.limit} запросов"
+        else:
+            limit_info = "Лимит не установлен"
+        
+        return (
+            f"Пользователь: {display_name}\n"
+            f"ID: {user.tg_id}\n"
+            f"LLM: {llm_status}\n"
+            f"{model_info}\n"
+            f"{limit_info}"
+        )
 
 
 def register_handlers(app):

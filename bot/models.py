@@ -86,3 +86,14 @@ class UserImage(Base):
     user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)
     image_path = Column(String, nullable=False)  # Путь к изображению в Minio
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class LLMModel(Base):
+    __tablename__ = "llm_models"
+    
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False, unique=True)  # Название модели для API
+    description = Column(String, nullable=False)  # Описание модели для отображения в боте
+    
+    def __repr__(self):
+        return f"<LLMModel(name='{self.name}', description='{self.description}')>"

@@ -17,6 +17,9 @@ async def on_startup(app):
         BotCommand("llm_enable", "Включить LLM (суперпользователь)"),
         BotCommand("llm_disable", "Выключить LLM (суперпользователь)"),
         BotCommand("llm_set_limit", "Установить лимит для пользователя (суперпользователь)"),
+        BotCommand("llm_set_model", "Установить модель LLM для пользователя (суперпользователь)"),
+        BotCommand("llm_user_enable", "Включить LLM для пользователя (суперпользователь)"),
+        BotCommand("llm_user_disable", "Выключить LLM для пользователя (суперпользователь)"),
     ]
     await app.bot.set_my_commands(commands)
     print("Бот запущен.")

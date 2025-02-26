@@ -34,6 +34,8 @@ class User(Base):
     full_name = Column(String, nullable=False)
     phone = Column(String, nullable=True)
     username = Column(String, nullable=True)
+    llm_model = Column(String(255), nullable=True, default=None)  # Модель LLM для пользователя
+    llm_enabled = Column(Boolean, default=True, nullable=False)  # Флаг включения LLM для пользователя
 
 
 class Feedback(Base):

@@ -41,7 +41,14 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = await session.execute(select(User).where(User.tg_id == tg_id))
         existing_user = result.scalar_one_or_none()
         if not existing_user:
-            new_user = User(tg_id=tg_id, full_name=full_name, phone=phone, username=username)
+            new_user = User(
+                tg_id=tg_id, 
+                full_name=full_name, 
+                phone=phone, 
+                username=username,
+                llm_model=os.getenv("LLM_API_MODEL"),  # Устанавливаем модель по умолчанию
+                llm_enabled=True  # По умолчанию LLM включен для пользователя
+            )
             session.add(new_user)
             await session.commit()
 
@@ -70,13 +77,42 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Обработчик команды /about
 async def about_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Получаем информацию о модели LLM пользователя
+    llm_model_info = ""
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.tg_id == str(user_id)))
+        user = result.scalar_one_or_none()
+        if user:
+            model_name = user.llm_model if user.llm_model else os.getenv('LLM_API_MODEL')
+            llm_enabled = "включена" if user.llm_enabled else "отключена"
+            
+            # Получаем информацию о глобальном состоянии LLM
+            config_result = await session.execute(select(LLMConfig))
+            config = config_result.scalars().first()
+            global_enabled = config is not None and config.enabled
+            
+            # Получаем информацию о лимите запросов
+            usage_result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == str(user_id)))
+            usage = usage_result.scalar_one_or_none()
+            limit_info = ""
+            if usage:
+                limit_info = f"Использовано {usage.used} из {usage.limit} запросов."
+            
+            llm_model_info = f"\n\n<b>Ваша модель LLM:</b> {model_name}\n"
+            llm_model_info += f"<b>Статус LLM для вас:</b> {llm_enabled}\n"
+            llm_model_info += f"<b>Глобальный статус LLM:</b> {'включена' if global_enabled else 'отключена'}\n"
+            if limit_info:
+                llm_model_info += f"<b>{limit_info}</b>"
+    
     about_text = (
         "<b>О боте</b>\n"
         "Этот бот был создан для конференции <i>Войти в IT</i> "
         f"Докладчик: <a href='https://t.me/{SUPERUSER_TG_NICK}'>{SUPERUSER_TG_NAME}</a>.\n"
         "Тема: <b>Использовании LLM в учебе, работе и жизни</b>.\n"
         "Здесь вы можете подробнее познакомиться с рассказанными примерами и источниками.\n\n"
-        f"<b>Также вам доступно несколько обращений к GPT, обращение происходит к {os.getenv('LLM_API_MODEL')}</b>.\n\n"
+        f"<b>Также вам доступно несколько обращений к GPT.</b>{llm_model_info}\n\n"
         "Исходный код бота доступен на <a href='https://github.com/NiKoV-HET/VoitiVIT_LLM_bot'>GitHub</a>"
     )
     await update.message.reply_text(about_text, parse_mode="HTML")
@@ -204,12 +240,19 @@ async def llm_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     prompt = update.message.text
 
-    # Проверка, включена ли LLM-функциональность
+    # Проверка, включена ли LLM-функциональность глобально
     async with async_session() as session:
         config_result = await session.execute(select(LLMConfig))
         config = config_result.scalars().first()
         if config is None or not config.enabled:
             await update.message.reply_text("LLM функция временно отключена.")
+            return
+        
+        # Проверка, включена ли LLM-функциональность для конкретного пользователя
+        user_result = await session.execute(select(User).where(User.tg_id == str(user_id)))
+        user = user_result.scalar_one_or_none()
+        if user is None or not user.llm_enabled:
+            await update.message.reply_text("LLM функция отключена для вашего аккаунта.")
             return
 
         # Получаем или создаём запись с лимитом для пользователя
@@ -225,10 +268,13 @@ async def llm_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_to_message_id=update.message.message_id,
             )
             return
+        
+        # Получаем модель LLM для пользователя
+        user_model = user.llm_model
 
     # Получаем ответ от LLM
     try:
-        response_text = await get_llm_response(prompt)
+        response_text = await get_llm_response(prompt, model=user_model)
     except Exception as e:
         async with async_session() as session:
             log = Log(user_id=str(user_id), message=f"Ошибка при обращении к LLM API. User:{user_id}, Error:{e}")
@@ -352,6 +398,167 @@ async def llm_set_limit_handler(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 
+# Новые обработчики для управления LLM моделью и включением/выключением LLM для пользователя
+async def llm_set_model_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != SUPERUSER_TG_ID:
+        await update.message.reply_text(
+            "У вас нет прав для выполнения этой команды.",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Используйте: /llm_set_model <tg_id или @username> <модель>",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    target_user = args[0]
+    model_name = args[1]
+
+    # Определяем, передан ли tg_id или username
+    if target_user.startswith("@"):
+        username = target_user[1:]  # Убираем символ @
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await update.message.reply_text(
+                    f"Пользователь с username {target_user} не найден.",
+                    reply_to_message_id=update.message.message_id,
+                )
+                return
+            target_tg_id = user.tg_id
+    else:
+        target_tg_id = target_user
+
+    # Обновляем модель LLM для пользователя
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.tg_id == str(target_tg_id)))
+        user = result.scalar_one_or_none()
+        if user is None:
+            await update.message.reply_text(
+                f"Пользователь с ID {target_tg_id} не найден.",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+        user.llm_model = model_name
+        await session.commit()
+
+    await update.message.reply_text(
+        f"Модель LLM для пользователя {target_tg_id} установлена на {model_name}.",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def llm_user_enable_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != SUPERUSER_TG_ID:
+        await update.message.reply_text(
+            "У вас нет прав для выполнения этой команды.",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "Используйте: /llm_user_enable <tg_id или @username>",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    target_user = args[0]
+
+    # Определяем, передан ли tg_id или username
+    if target_user.startswith("@"):
+        username = target_user[1:]  # Убираем символ @
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await update.message.reply_text(
+                    f"Пользователь с username {target_user} не найден.",
+                    reply_to_message_id=update.message.message_id,
+                )
+                return
+            target_tg_id = user.tg_id
+    else:
+        target_tg_id = target_user
+
+    # Включаем LLM для пользователя
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.tg_id == str(target_tg_id)))
+        user = result.scalar_one_or_none()
+        if user is None:
+            await update.message.reply_text(
+                f"Пользователь с ID {target_tg_id} не найден.",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+        user.llm_enabled = True
+        await session.commit()
+
+    await update.message.reply_text(
+        f"LLM функция включена для пользователя {target_tg_id}.",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
+async def llm_user_disable_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if str(update.effective_user.id) != SUPERUSER_TG_ID:
+        await update.message.reply_text(
+            "У вас нет прав для выполнения этой команды.",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "Используйте: /llm_user_disable <tg_id или @username>",
+            reply_to_message_id=update.message.message_id,
+        )
+        return
+
+    target_user = args[0]
+
+    # Определяем, передан ли tg_id или username
+    if target_user.startswith("@"):
+        username = target_user[1:]  # Убираем символ @
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.username == username))
+            user = result.scalar_one_or_none()
+            if user is None:
+                await update.message.reply_text(
+                    f"Пользователь с username {target_user} не найден.",
+                    reply_to_message_id=update.message.message_id,
+                )
+                return
+            target_tg_id = user.tg_id
+    else:
+        target_tg_id = target_user
+
+    # Выключаем LLM для пользователя
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.tg_id == str(target_tg_id)))
+        user = result.scalar_one_or_none()
+        if user is None:
+            await update.message.reply_text(
+                f"Пользователь с ID {target_tg_id} не найден.",
+                reply_to_message_id=update.message.message_id,
+            )
+            return
+        user.llm_enabled = False
+        await session.commit()
+
+    await update.message.reply_text(
+        f"LLM функция отключена для пользователя {target_tg_id}.",
+        reply_to_message_id=update.message.message_id,
+    )
+
+
 def register_handlers(app):
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("about", about_handler))
@@ -359,6 +566,9 @@ def register_handlers(app):
     app.add_handler(CommandHandler("llm_enable", llm_enable_handler))
     app.add_handler(CommandHandler("llm_disable", llm_disable_handler))
     app.add_handler(CommandHandler("llm_set_limit", llm_set_limit_handler))
+    app.add_handler(CommandHandler("llm_set_model", llm_set_model_handler))
+    app.add_handler(CommandHandler("llm_user_enable", llm_user_enable_handler))
+    app.add_handler(CommandHandler("llm_user_disable", llm_user_disable_handler))
     app.add_handler(CallbackQueryHandler(category_callback, pattern=r"^category:"))
     app.add_handler(CallbackQueryHandler(back_to_categories_callback, pattern=r"^back_to_categories$"))
     app.add_handler(CallbackQueryHandler(subtopic_callback, pattern=r"^subtopic:"))

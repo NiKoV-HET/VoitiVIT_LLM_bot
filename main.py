@@ -5,11 +5,16 @@ from bot.config import BOT_TOKEN
 from bot.database import engine
 from bot.handlers import register_handlers
 from bot.models import Base
+from bot.storage import init_minio
 
 
 async def on_startup(app):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    
+    # Инициализация Minio
+    await init_minio()
+    
     commands = [
         BotCommand("start", "Начать работу с ботом"),
         BotCommand("about", "О боте"),

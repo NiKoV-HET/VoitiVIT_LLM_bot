@@ -9,7 +9,8 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, Mes
 from bot.database import async_session
 from bot.keyboards import get_categories_inline_keyboard, get_main_reply_keyboard, get_subtopics_inline_keyboard
 from bot.llm import get_llm_response
-from bot.models import Category, Feedback, LLMConfig, LLMRequest, LLMUsage, Log, Subtopic, User
+from bot.models import Category, Feedback, LLMConfig, LLMRequest, LLMUsage, Log, Subtopic, User, UserImage
+from bot.storage import image_to_base64, save_image
 
 # Простой in‑memory rate limiting (5 запросов в минуту)
 user_requests = {}
@@ -17,6 +18,9 @@ RATE_LIMIT = 20  # запросов в минуту
 SUPERUSER_TG_ID = os.getenv("SUPERUSER_TG_ID")  # Суперпользовательский TG id из .env
 SUPERUSER_TG_NICK = os.getenv("SUPERUSER_TG_NICK")  # Суперпользовательский TG Nick из .env
 SUPERUSER_TG_NAME = os.getenv("SUPERUSER_TG_NAME")  # Имя суперпользователя
+
+# Словарь для хранения последних загруженных изображений пользователей
+user_last_image = {}
 
 
 async def check_rate_limit(user_id: int) -> bool:
@@ -230,7 +234,130 @@ async def subtopic_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("Подтема не найдена.", parse_mode="HTML")
 
 
-# Новый обработчик для LLM-запросов (если пользователь просто пишет боту)
+# Новый обработчик для фотографий
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await register_user(update, context)  # Автоматическая регистрация пользователя
+    if not await check_rate_limit(user_id):
+        await update.message.reply_text("Слишком много запросов. Пожалуйста, подождите.")
+        return
+
+    # Получаем фото с наилучшим качеством
+    photo_file = await update.message.photo[-1].get_file()
+    photo_bytes = await photo_file.download_as_bytearray()
+    
+    # Получаем подпись к фотографии (если есть)
+    caption = update.message.caption
+    
+    # Сохраняем изображение в Minio
+    try:
+        image_path = await save_image(photo_bytes, str(user_id))
+        
+        # Сохраняем информацию о загруженном изображении в БД
+        async with async_session() as session:
+            user_image = UserImage(user_id=str(user_id), image_path=image_path)
+            session.add(user_image)
+            await session.commit()
+            
+            # Логируем загрузку изображения
+            log = Log(user_id=str(user_id), message=f"Uploaded image: {image_path}")
+            session.add(log)
+            await session.commit()
+        
+        # Проверяем, есть ли подпись к фотографии
+        if caption:
+            # Если есть подпись, сразу отправляем запрос в LLM
+            # Проверка, включена ли LLM-функциональность глобально и для пользователя
+            async with async_session() as session:
+                config_result = await session.execute(select(LLMConfig))
+                config = config_result.scalars().first()
+                if config is None or not config.enabled:
+                    await update.message.reply_text("LLM функция временно отключена.")
+                    return
+                
+                # Проверка, включена ли LLM-функциональность для конкретного пользователя
+                user_result = await session.execute(select(User).where(User.tg_id == str(user_id)))
+                user = user_result.scalar_one_or_none()
+                if user is None or not user.llm_enabled:
+                    await update.message.reply_text("LLM функция отключена для вашего аккаунта.")
+                    return
+
+                # Получаем или создаём запись с лимитом для пользователя
+                result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == str(user_id)))
+                usage = result.scalar_one_or_none()
+                if usage is None:
+                    usage = LLMUsage(user_id=str(user_id), used=0, limit=int(os.getenv("DEFAULT_LIMIT_LLM")))
+                    session.add(usage)
+                    await session.commit()
+                if usage.used >= usage.limit:
+                    await update.message.reply_text(
+                        f"Вы исчерпали лимит запросов. Для увеличения обратитесь к @{SUPERUSER_TG_NICK}",
+                        reply_to_message_id=update.message.message_id,
+                    )
+                    return
+                
+                # Получаем модель LLM для пользователя
+                user_model = user.llm_model
+            
+            # Конвертируем изображение в base64
+            try:
+                image_base64 = await image_to_base64(image_path)
+                
+                # Получаем ответ от LLM
+                response_text = await get_llm_response(caption, model=user_model, image_base64=image_base64)
+                
+                # Сохраняем запрос и ответ в БД и увеличиваем счётчик использования
+                async with async_session() as session:
+                    llm_req = LLMRequest(user_id=str(user_id), prompt=caption, response=response_text)
+                    session.add(llm_req)
+                    # Обновляем лимит
+                    result = await session.execute(select(LLMUsage).where(LLMUsage.user_id == str(user_id)))
+                    usage = result.scalar_one_or_none()
+                    if usage:
+                        usage.used += 1
+                    await session.commit()
+                
+                # Отправляем ответ пользователю
+                await update.message.reply_text(
+                    response_text,
+                    parse_mode="HTML",
+                    reply_to_message_id=update.message.message_id,
+                )
+            except Exception as e:
+                async with async_session() as session:
+                    log = Log(user_id=str(user_id), message=f"Error processing image with caption for LLM: {str(e)}")
+                    session.add(log)
+                    await session.commit()
+                await update.message.reply_text(
+                    f"Произошла ошибка при обработке запроса: {str(e)}",
+                    reply_to_message_id=update.message.message_id,
+                )
+        else:
+            # Если нет подписи, сохраняем изображение для следующего запроса
+            user_last_image[str(user_id)] = image_path
+            
+            # Проверяем, включена ли LLM-функциональность для пользователя
+            async with async_session() as session:
+                user_result = await session.execute(select(User).where(User.tg_id == str(user_id)))
+                user = user_result.scalar_one_or_none()
+                
+                if user and user.llm_enabled:
+                    await update.message.reply_text(
+                        "Изображение успешно загружено. Теперь вы можете задать вопрос о нём, и я отправлю его вместе с вашим запросом в LLM."
+                    )
+                else:
+                    await update.message.reply_text(
+                        "Изображение успешно загружено. Обратите внимание, что функция LLM отключена для вашего аккаунта."
+                    )
+    except Exception as e:
+        await update.message.reply_text(f"Произошла ошибка при загрузке изображения: {str(e)}")
+        async with async_session() as session:
+            log = Log(user_id=str(user_id), message=f"Error uploading image: {str(e)}")
+            session.add(log)
+            await session.commit()
+
+
+# Обновленный обработчик для LLM-запросов
 async def llm_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     await register_user(update, context)  # Автоматическая регистрация пользователя
@@ -271,10 +398,24 @@ async def llm_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Получаем модель LLM для пользователя
         user_model = user.llm_model
+    
+    # Проверяем, есть ли у пользователя последнее загруженное изображение
+    image_base64 = None
+    if str(user_id) in user_last_image:
+        try:
+            image_path = user_last_image[str(user_id)]
+            image_base64 = await image_to_base64(image_path)
+            # Удаляем изображение из словаря, чтобы оно не использовалось повторно
+            del user_last_image[str(user_id)]
+        except Exception as e:
+            async with async_session() as session:
+                log = Log(user_id=str(user_id), message=f"Error processing image for LLM: {str(e)}")
+                session.add(log)
+                await session.commit()
 
     # Получаем ответ от LLM
     try:
-        response_text = await get_llm_response(prompt, model=user_model)
+        response_text = await get_llm_response(prompt, model=user_model, image_base64=image_base64)
     except Exception as e:
         async with async_session() as session:
             log = Log(user_id=str(user_id), message=f"Ошибка при обращении к LLM API. User:{user_id}, Error:{e}")
@@ -572,4 +713,5 @@ def register_handlers(app):
     app.add_handler(CallbackQueryHandler(category_callback, pattern=r"^category:"))
     app.add_handler(CallbackQueryHandler(back_to_categories_callback, pattern=r"^back_to_categories$"))
     app.add_handler(CallbackQueryHandler(subtopic_callback, pattern=r"^subtopic:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler), group=1)
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.TEXT, message_handler))

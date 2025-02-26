@@ -174,3 +174,5 @@ cython_debug/
 .pypirc
 pgdata/
 tmp/
+minio_data/
+.cursorignore

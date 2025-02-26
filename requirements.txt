@@ -6,3 +6,7 @@ alembic==1.14.1
 greenlet==3.1.1
 python-telegram-bot==21.10
 openai==1.64.0
+minio==7.2.5
+Pillow==10.3.0
+python-magic==0.4.27
+uuid==1.30

@@ -77,3 +77,12 @@ class LLMConfig(Base):
     __tablename__ = "llm_config"
     id = Column(Integer, primary_key=True, index=True)
     enabled = Column(Boolean, default=True, nullable=False)
+
+
+# Новая модель для хранения информации о загруженных изображениях
+class UserImage(Base):
+    __tablename__ = "user_images"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(String, ForeignKey("users.tg_id"), nullable=False)
+    image_path = Column(String, nullable=False)  # Путь к изображению в Minio
+    created_at = Column(DateTime, default=datetime.utcnow)
